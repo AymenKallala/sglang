@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -17,6 +18,7 @@ from sglang.srt.entrypoints.openai.protocol import (
 )
 from sglang.srt.entrypoints.openai.serving_base import OpenAIServingBase
 from sglang.srt.managers.io_struct import EmbeddingReqInput
+from sglang.srt.plugins.io_processor import PreparedInput, load_io_processor
 
 if TYPE_CHECKING:
     from sglang.srt.managers.tokenizer_manager import TokenizerManager
@@ -35,13 +37,14 @@ class OpenAIServingClassify(OpenAIServingBase):
     ):
         super().__init__(tokenizer_manager)
         self.template_manager = template_manager
+        self.io_processor = load_io_processor("classify", tokenizer_manager)
         self.id2label = self._get_id2label_mapping()
         self.model_name = (
             self.tokenizer_manager.served_model_name
             if self.tokenizer_manager.served_model_name
             else self.tokenizer_manager.model_path
         )
-        if not self.id2label:
+        if not self.id2label and self.io_processor is None:
             raise ValueError("id2label mapping is missing")
 
     def _request_id_prefix(self) -> str:
@@ -51,9 +54,20 @@ class OpenAIServingClassify(OpenAIServingBase):
         self,
         request: ClassifyRequest,
         raw_request: Request = None,
-    ) -> tuple[EmbeddingReqInput, ClassifyRequest]:
+    ) -> tuple[EmbeddingReqInput, ClassifyRequest | PreparedInput]:
         """Convert OpenAI embedding request to internal format"""
         prompt = request.input
+
+        if isinstance(prompt, dict):
+            prepared = self.io_processor.prepare(prompt)
+            prompt = prepared.prompt
+            if (
+                isinstance(prompt, list)
+                and len(prompt) > self.tokenizer_manager.context_len
+            ):
+                raise ValueError("Prepared input exceeds the model context length")
+        else:
+            prepared = request
 
         if isinstance(prompt, str):
             # Single string input
@@ -74,10 +88,16 @@ class OpenAIServingClassify(OpenAIServingBase):
             priority=request.priority,
         )
 
-        return adapted_request, request
+        return adapted_request, prepared
 
     def _validate_request(self, request: ClassifyRequest) -> Optional[str]:
         """Validate that the input is not empty or whitespace only."""
+        if isinstance(request.input, dict):
+            if self.io_processor is None:
+                return "Object input requires a configured classify I/O processor"
+            return None
+        if not self.id2label:
+            return "Text and token ID inputs require an id2label mapping"
         if not (input := request.input):
             return "Input cannot be empty"
 
@@ -129,7 +149,7 @@ class OpenAIServingClassify(OpenAIServingBase):
     async def _handle_non_streaming_request(
         self,
         adapted_request: EmbeddingReqInput,
-        request: ClassifyRequest,
+        request: ClassifyRequest | PreparedInput,
         raw_request: Request,
     ) -> Union[ClassifyResponse, ErrorResponse, ORJSONResponse]:
         """Handle non-streaming classification request."""
@@ -145,10 +165,18 @@ class OpenAIServingClassify(OpenAIServingBase):
         if not isinstance(ret, list):
             ret = [ret]
 
+        if isinstance(request, PreparedInput):
+            if len(ret) != 1:
+                raise RuntimeError(
+                    "Expected one model output for a prepared classify input"
+                )
+            return await asyncio.to_thread(self._build_classify_response, ret, request)
         response = self._build_classify_response(ret)
         return response
 
-    def _build_classify_response(self, ret: List[Dict[str, Any]]) -> ClassifyResponse:
+    def _build_classify_response(
+        self, ret: List[Dict[str, Any]], prepared: PreparedInput | None = None
+    ) -> ClassifyResponse:
         request_id = f"{self._request_id_prefix()}{uuid.uuid4().hex}"
         created_time = int(time.time())
         classify_objects = []
@@ -161,6 +189,12 @@ class OpenAIServingClassify(OpenAIServingBase):
 
             prompt_tokens += meta_info.get("prompt_tokens", 0)
             total_latency += meta_info.get("e2e_latency", 0.0)
+
+            if prepared is not None:
+                classify_objects.append(
+                    self.io_processor.postprocess(item["embedding"], prepared.context)
+                )
+                continue
 
             if embedding:
                 try:
@@ -201,4 +235,6 @@ class OpenAIServingClassify(OpenAIServingBase):
             },
         }
 
+        if prepared is not None:
+            return ClassifyResponse[dict[str, Any]](**response)
         return ClassifyResponse(**response)

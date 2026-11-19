@@ -35,12 +35,15 @@ _plugins_loaded = False
 def load_plugins_by_group(
     group: str,
     excluded_dists: set[str] | None = None,
-) -> dict[str, tuple[Callable[[], Any], str | None]]:
+    *,
+    name: str | None = None,
+) -> dict[str, tuple[Callable[..., Any], str | None]]:
     """
     Discover and load plugins registered under the given entry point group.
 
     Args:
         group: The setuptools entry_point group name.
+        name: Only import this entry point, if specified.
         excluded_dists: Distribution names to skip. Plugins from these
             distributions are never ``ep.load()``-ed (avoids importing
             their modules and pulling hardware-specific dependencies).
@@ -55,6 +58,10 @@ def load_plugins_by_group(
         allowed_set = {x.strip() for x in allowed_str.split(",") if x.strip()}
 
     discovered = entry_points(group=group)
+    if name is not None:
+        discovered = [ep for ep in discovered if ep.name == name]
+        if len(discovered) > 1:
+            raise ValueError(f"Multiple entry points named {name!r} in {group!r}")
     if len(discovered) == 0:
         logger.debug("No plugins found for group %s.", group)
         return {}
@@ -63,7 +70,7 @@ def load_plugins_by_group(
     for ep in discovered:
         logger.info("  - %s -> %s", ep.name, ep.value)
 
-    plugins: dict[str, tuple[Callable[[], Any], str | None]] = {}
+    plugins: dict[str, tuple[Callable[..., Any], str | None]] = {}
     for ep in discovered:
         if allowed_set is not None and ep.name not in allowed_set:
             logger.info("Skipping plugin %s (not in SGLANG_PLUGINS)", ep.name)

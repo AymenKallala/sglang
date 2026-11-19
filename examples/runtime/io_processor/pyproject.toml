@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sglang-example-turn-scores"
+version = "0.1.0"
+
+[project.entry-points."sglang.io_processors"]
+turn_scores = "turn_scores:TurnScores"
+
+[tool.setuptools]
+py-modules = ["turn_scores"]
