@@ -46,7 +46,7 @@ class TokenizerManagerScoreMixin:
     async def score_prompts(
         self,
         prompts: Union[str, List[str], List[List[int]]],
-        label_token_ids: Union[List[int], List[List[int]]],
+        label_token_ids: Optional[Union[List[int], List[List[int]]]],
         apply_softmax: bool = False,
         request: Optional[Any] = None,
         temperature: float = 1.0,

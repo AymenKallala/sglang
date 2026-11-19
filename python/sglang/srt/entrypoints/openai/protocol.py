@@ -26,6 +26,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Generic,
     List,
     Literal,
     NamedTuple,
@@ -73,7 +74,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
-from typing_extensions import Literal
+from typing_extensions import Literal, TypeVar
 
 try:
     from xgrammar import StructuralTag
@@ -1578,7 +1579,7 @@ class EmbeddingObject(BaseModel):
     object: str = "embedding"
 
 
-ClassifyInput = Union[str, List[str], List[int]]
+ClassifyInput = Union[str, List[str], List[int], Dict[str, Any]]
 
 
 class ClassifyRequest(BaseModel):
@@ -1600,12 +1601,15 @@ class ClassifyData(BaseModel):
     num_classes: int
 
 
-class ClassifyResponse(BaseModel):
+ClassifyResultT = TypeVar("ClassifyResultT", default=ClassifyData)
+
+
+class ClassifyResponse(BaseModel, Generic[ClassifyResultT]):
     id: str
     object: str = "list"
     created: int
     model: str
-    data: List[ClassifyData]
+    data: List[ClassifyResultT]
     usage: UsageInfo
 
 

@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from sglang.srt.entrypoints.openai.protocol import V1RerankReqInput
@@ -13,9 +14,9 @@ register_amd_ci(est_time=10, suite="base-b-test-1-gpu-small-amd")
 try:
     from sglang.srt.entrypoints.openai.serving_rerank import (
         OpenAIServingRerank,
+        Qwen3TextRerankProcessor,
         _is_qwen3_reranker_template,
         _qwen3_rerank_score,
-        _render_jinja_chat_template,
     )
 except ModuleNotFoundError as e:
     # Some minimal environments used for unit tests may not have FastAPI/torch installed.
@@ -28,6 +29,7 @@ except ModuleNotFoundError as e:
 
 class _DummyModelConfig:
     # Keep consistent with TokenizerManager.model_config usage
+    hf_config = SimpleNamespace()
     is_generation = False
 
 
@@ -65,15 +67,20 @@ class TestOpenAIServingRerankUnit(unittest.TestCase):
         self.assertEqual(getattr(adapted, "text"), [["q", "doc-a"], ["q", "doc-b"]])
         self.assertEqual(processed, req)
 
-    def test_convert_to_internal_request_qwen3_template_returns_request(self):
+    def test_convert_to_internal_request_qwen3_prepares_each_document(self):
         tm = _DummyTokenizerManager()
+        tm.model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(), is_generation=True
+        )
         tm.tokenizer.chat_template = (
             '... Note that the answer can only be "yes" or "no". ...'
         )
         handler = OpenAIServingRerank(tm)
         req = V1RerankReqInput(query="q", documents=["d1"])
         adapted, processed = handler._convert_to_internal_request(req)
-        self.assertIs(adapted, req)
+        self.assertEqual(
+            [item.prompt for item in adapted], [tm.tokenizer.chat_template]
+        )
         self.assertIs(processed, req)
 
     def test_build_rerank_response_embedding_list_uses_first_scalar(self):
@@ -128,7 +135,7 @@ class TestOpenAIServingRerankUnit(unittest.TestCase):
         self.assertAlmostEqual(_qwen3_rerank_score(0.9, 0.1), 0.9)
         self.assertAlmostEqual(_qwen3_rerank_score(0.0, 0.0), 0.0)
 
-    def test_helper_render_jinja_chat_template(self):
+    def test_qwen3_processor_renders_instruction(self):
         # Skip if jinja2 isn't installed in this environment.
         try:
             import jinja2  # noqa: F401
@@ -136,12 +143,13 @@ class TestOpenAIServingRerankUnit(unittest.TestCase):
             self.skipTest("jinja2 is not installed")
 
         tpl = "{{ instruct | default('DEF') }}|{{ messages[0]['content'] }}|{{ messages[1]['content'] }}"
+        processor = Qwen3TextRerankProcessor(tpl, [1, 2])
         self.assertEqual(
-            _render_jinja_chat_template(tpl, query="Q", document="D", instruct=None),
+            processor.prepare({"query": "Q", "document": "D", "instruct": None}).prompt,
             "DEF|Q|D",
         )
         self.assertEqual(
-            _render_jinja_chat_template(tpl, query="Q", document="D", instruct="I"),
+            processor.prepare({"query": "Q", "document": "D", "instruct": "I"}).prompt,
             "I|Q|D",
         )
 
@@ -149,7 +157,7 @@ class TestOpenAIServingRerankUnit(unittest.TestCase):
         class _TM(_DummyTokenizerManager):
             def __init__(self):
                 self.server_args = object()
-                self.model_config = Mock()
+                self.model_config = Mock(hf_config=SimpleNamespace())
                 self.model_config.is_generation = True
                 self.model_config.model_path = "qwen/qwen3"
                 self.tokenizer = Mock()
@@ -247,7 +255,7 @@ class TestOpenAIServingRerankUnit(unittest.TestCase):
         class _TM(_DummyTokenizerManager):
             def __init__(self):
                 self.server_args = object()
-                self.model_config = Mock()
+                self.model_config = Mock(hf_config=SimpleNamespace())
                 self.model_config.is_generation = True
                 self.model_config.model_path = "qwen/qwen3-vl"
                 self.tokenizer = Mock()
