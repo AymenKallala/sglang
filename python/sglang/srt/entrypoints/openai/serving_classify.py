@@ -9,6 +9,7 @@ import torch
 from fastapi import Request
 from fastapi.responses import ORJSONResponse
 
+from sglang.srt.configs.embedding_model_spec import EmbeddingTask
 from sglang.srt.entrypoints.openai.protocol import (
     DEFAULT_CLASSIFICATION_THRESHOLD,
     ClassifyRequest,
@@ -36,8 +37,11 @@ class OpenAIServingClassify(OpenAIServingBase):
         super().__init__(tokenizer_manager)
         self.template_manager = template_manager
         self.id2label = self._get_id2label_mapping()
-        hf_config = tokenizer_manager.model_config.hf_config
-        self.problem_type = getattr(hf_config, "problem_type", None)
+        model_config = tokenizer_manager.model_config
+        self.problem_type = getattr(model_config.hf_config, "problem_type", None)
+        self.is_token_classifier = (
+            model_config.embedding_model_spec.task == EmbeddingTask.TOKEN_CLASSIFY
+        )
         self.activation = self._get_clf_activation()
         self.model_name = (
             self.tokenizer_manager.served_model_name
@@ -175,44 +179,45 @@ class OpenAIServingClassify(OpenAIServingBase):
 
         for i, item in enumerate(ret):
             embedding = item.get("embedding", [])
-            labels = [] if is_multi_label else None
-            # Single-score model heads may return scalars, including 0.0.
-            if isinstance(embedding, (int, float)):
-                embedding = [embedding]
             meta_info = item.get("meta_info", {})
 
             prompt_tokens += meta_info.get("prompt_tokens", 0)
             total_latency += meta_info.get("e2e_latency", 0.0)
 
-            if embedding:
+            if isinstance(embedding, (int, float)):
+                embedding = [embedding]
+            if embedding or self.is_token_classifier:
+                # Treat a sequence as a single score row for activation and labeling.
+                rows = embedding if self.is_token_classifier else [embedding]
                 try:
-                    embedding_tensor = torch.tensor(embedding, dtype=torch.float32)
-                    probs = self.activation(embedding_tensor).tolist()
+                    embedding_tensor = torch.tensor(rows, dtype=torch.float32)
+                    if embedding_tensor.ndim != 2 or not embedding_tensor.numel():
+                        raise ValueError("expected nonempty score rows")
+                except (TypeError, ValueError) as e:
+                    shape = (
+                        "[tokens, classes]" if self.is_token_classifier else "[classes]"
+                    )
+                    raise RuntimeError(f"Expected {shape} scores for item {i}") from e
 
-                    predicted_class = torch.argmax(embedding_tensor).item()
-
-                    label = self.id2label[predicted_class]
-                    if is_multi_label:
-                        labels = [
-                            self.id2label[class_id]
-                            for class_id, prob in enumerate(probs)
-                            if prob >= threshold and class_id in self.id2label
-                        ]
-
-                except Exception as e:
-                    logger.error(f"Error processing embedding for item {i}: {e}")
-                    probs = [1.0]
-                    label = "Default"
+                probs = self.activation(embedding_tensor).tolist()
+                if is_multi_label:
+                    label = [self._get_positive_labels(row, threshold) for row in probs]
+                else:
+                    class_ids = embedding_tensor.argmax(dim=-1).tolist()
+                    label = [self.id2label[class_id] for class_id in class_ids]
+                num_classes = len(probs[0])
+                if not self.is_token_classifier:
+                    probs, label = probs[0], label[0]
             else:
                 probs = [1.0]
-                label = "Default"
+                label = [] if is_multi_label else "Default"
+                num_classes = 1
 
             classify_obj = {
                 "index": i,
                 "label": label,
-                "labels": labels,
                 "probs": probs,
-                "num_classes": len(probs),
+                "num_classes": num_classes,
             }
             classify_objects.append(classify_obj)
 
@@ -231,3 +236,10 @@ class OpenAIServingClassify(OpenAIServingBase):
         }
 
         return ClassifyResponse(**response)
+
+    def _get_positive_labels(self, probs: List[float], threshold: float) -> List[str]:
+        return [
+            self.id2label[class_id]
+            for class_id, prob in enumerate(probs)
+            if prob >= threshold and class_id in self.id2label
+        ]

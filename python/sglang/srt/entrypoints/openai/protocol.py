@@ -1602,17 +1602,22 @@ class ClassifyRequest(BaseModel):
 
 class ClassifyData(BaseModel):
     index: int
-    label: str
-    probs: List[float]
+    label: Union[str, List[str], List[List[str]]]
+    probs: Union[List[float], List[List[float]]]
     num_classes: int
-    labels: Optional[List[str]] = None
 
-    @model_serializer(mode="wrap")
-    def _serialize(self, handler):
-        data = handler(self)
-        if self.labels is None:
-            data.pop("labels", None)
-        return data
+    @model_validator(mode="after")
+    def _validate_result_shape(self) -> ClassifyData:
+        if self.probs and isinstance(self.probs[0], list):
+            if not isinstance(self.label, list) or len(self.label) != len(self.probs):
+                raise ValueError("token results need one label entry per score row")
+        elif (
+            isinstance(self.label, list)
+            and self.label
+            and isinstance(self.label[0], list)
+        ):
+            raise ValueError("nested labels require per-token score rows")
+        return self
 
 
 class ClassifyResponse(BaseModel):
