@@ -1579,7 +1579,6 @@ class EmbeddingObject(BaseModel):
 
 
 ClassifyInput = Union[str, List[str], List[int]]
-DEFAULT_CLASSIFICATION_THRESHOLD = 0.5
 
 
 class ClassifyRequest(BaseModel):
@@ -1587,12 +1586,6 @@ class ClassifyRequest(BaseModel):
     model: str = DEFAULT_MODEL_NAME
     input: ClassifyInput
     user: Optional[str] = None
-    threshold: float = Field(
-        default=DEFAULT_CLASSIFICATION_THRESHOLD,
-        ge=0.0,
-        le=1.0,
-        description="Minimum score for a positive label in multi-label classification.",
-    )
 
     # The request id.
     rid: Optional[Union[List[str], str]] = None
@@ -1602,17 +1595,9 @@ class ClassifyRequest(BaseModel):
 
 class ClassifyData(BaseModel):
     index: int
-    label: str
-    probs: List[float]
+    label: Union[str, List[str]]
+    probs: Union[List[float], List[List[float]]]
     num_classes: int
-    labels: Optional[List[str]] = None
-
-    @model_serializer(mode="wrap")
-    def _serialize(self, handler):
-        data = handler(self)
-        if self.labels is None:
-            data.pop("labels", None)
-        return data
 
 
 class ClassifyResponse(BaseModel):
@@ -1882,7 +1867,7 @@ class V1RerankReqInput(BaseModel):
 
 class RerankResponse(BaseModel):
     score: float
-    document: Optional[str] = None
+    document: Optional[RerankContent] = None
     index: int
     meta_info: Optional[dict] = None
 
